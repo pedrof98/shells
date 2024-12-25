@@ -4,9 +4,25 @@
 #include <stdio.h> // for printf(), fprintf(), stderr, getchar() and perror()
 #include <string.h> // for strcmp(), strtok()
 #include <dirent.h>
+#include <termios.h>
 
+#define HISTORY_MAX 1000
+
+// structure for history -- to store previous commands
+typedef struct {
+	char **commands; // array of command strings
+	int count;		 // number of commands stored
+	int capacity;    // max number of commands that can be stored
+} History;
+
+struct termios orig_termios;
 
 // Function prototypes
+History *history_init(void);
+void history_add(History *hist, char *command);
+void history_free(History *hist);
+void history_save(History *hist);
+void history_load(History *hist);
 void lsh_loop(void);
 char *lsh_read_line(void);
 char **lsh_split_line(char *line);
@@ -19,7 +35,21 @@ int lsh_num_builtins(void);
 int lsh_ls(char **args);
 int lsh_pwd(char **args);
 int lsh_clear(char **args); 
+int lsh_history(char **args);
 
+// Add global history
+History *shell_history;
+
+void enable_raw_mode() {
+	tcgetattr(STDIN_FILENO, &orig_termios);
+	struct termios raw = orig_termios;
+	raw.c_lflag &= ~(ICANON | ECHO);
+	tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+}
+
+void disable_raw_mode() {
+	tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
+}
 
 void lsh_loop(void)
 {
@@ -46,25 +76,68 @@ char *lsh_read_line(void)
 	int position = 0;
 	char *buffer = malloc(sizeof(char) * bufsize);
 	int c;
+	int history_pos = shell_history->count;
 
 	if (!buffer){
 		fprintf(stderr, "lsh: allocation error\n");
 		exit(EXIT_FAILURE);
        	}
 
+	enable_raw_mode();
+
 	while (1) {
 		// Read a character
 		c = getchar();
 
-		// If we hit EOF, replace it with a null character and return
-		if (c == EOF || c == '\n') {
-			buffer[position] = '\0';
-			return buffer;
+		if (c ==27) { //ESC Sequence
+			      char seq[3];
+			      seq[0] = getchar();
+			      seq[1] = getchar();
+
+			      if (seq[0] == '[') {
+				      if (seq[1] == 'A') { //Up arrow
+							   if (history_pos > 0) {
+								   history_pos--;
+								   strcpy(buffer, shell_history->commands[history_pos]);
+								   printf("\r> %s\033[K", buffer); // clear to end of line
+								   position = strlen(buffer);
+							   }
+							   continue;
+				      }
+				      else if (seq[1] == 'B') { //Down arrow
+								if (history_pos < shell_history->count -1) { // Fixed bounds check
+									history_pos++;
+									strcpy(buffer, shell_history->commands[history_pos]);
+									printf("\r> %s\033[K]", buffer); // clear to end of line
+									position = strlen(buffer);
+								}
+								else if (history_pos < shell_history->count -1) {
+									// Clear line if at newest command
+									buffer[0] = '\0';
+									printf("\r> \033[K");
+									position = 0;
+								}
+								continue;
+				      }
+			      }
+				  continue;
 		}
-	       	else {
-			buffer[position] = c;
-		}
-		position++;
+			if (c == '\n') {
+				buffer[position] = '\0';
+				printf("\n");
+				disable_raw_mode();
+				if (position > 0) {
+				history_add(shell_history, buffer);
+				}
+				return buffer;
+			}
+
+		if (c >= 32) {  // Printable characters
+            buffer[position] = c;
+            position++;
+            printf("%c", c);
+        }
+
 
 		// If we have exceeded the buffer, reallocate
 		if (position >= bufsize) {
@@ -77,6 +150,7 @@ char *lsh_read_line(void)
 		}
 	}
 }
+
 
 
 
@@ -165,7 +239,8 @@ char *builtin_str[] = {
 	"exit",
 	"ls",
 	"pwd",
-	"clear"
+	"clear",
+	"history"
 };
 
 int (*builtin_func[]) (char **) = {
@@ -174,7 +249,8 @@ int (*builtin_func[]) (char **) = {
 	&lsh_exit,
 	&lsh_ls,
 	&lsh_pwd,
-	&lsh_clear
+	&lsh_clear,
+	&lsh_history
 };
 
 int lsh_num_builtins() {
@@ -200,7 +276,7 @@ int lsh_cd(char **args)
 int lsh_help(char **args)
 {
 	int i;
-	printf("Stephen Brennan's LSH\n");
+	printf("Based off Stephen Brennan's LSH\n");
 	printf("Type program names and arguments, and hit enter.\n");
 	printf("The following are built in:\n");
 
@@ -281,12 +357,80 @@ int lsh_execute(char **args)
 }
 
 
+History *history_init(void) {
+	History *hist = malloc(sizeof(History));
+	hist->commands = malloc(sizeof(char*) * HISTORY_MAX);
+	hist->count = 0;
+	hist->capacity = HISTORY_MAX;
+	return hist;
+}
+
+void history_add(History *hist, char *command) {
+	if (hist->count >= hist->capacity) {
+		// remove oldest command
+		free(hist->commands[0]);
+		for (int i = 0; i < hist->count - 1; i++) {
+			hist->commands[i] = hist->commands[i + 1];
+		}
+		hist->count--;
+	}
+	hist->commands[hist->count++] = strdup(command);
+}
+
+
+void history_free(History *hist){
+	for (int i = 0; i < hist->count; i++) {
+		free(hist->commands[i]);
+	}
+	free(hist->commands);
+	free(hist);
+}
+
+
+void history_save(History *hist) {
+	FILE *fp = fopen(".shell_history", "w");
+	if (!fp) {
+		perror("lsh: history save");
+		return;
+	}
+	for (int i = 0; i < hist->count; i++) {
+		fprintf(fp, "%s\n", hist->commands[i]);
+	}
+	fclose(fp);
+}
+
+void history_load(History *hist) {
+	FILE *fp = fopen(".shell_history", "r");
+	if (!fp) return;
+
+	char buffer[1024];
+	while (fgets(buffer, sizeof(buffer), fp)) {
+		buffer[strcspn(buffer, "\n")] = 0;
+		history_add(hist, buffer);
+	}
+	fclose(fp);
+}
+
+
+int lsh_history(char **args) {
+	for (int i = 0; i < shell_history->count; i++) {
+		printf("%d %s\n", i + 1, shell_history->commands[i]);
+	}
+	return 1;
+}
+
+
 int main(int argc, char **argv)
 {
+	shell_history = history_init();
+	history_load(shell_history);
 	// Load config files, if any
 	//
 	// Run command loop
 	lsh_loop();
+
+	history_save(shell_history);
+	history_free(shell_history);
 
 	// Perform any shutdown/cleanup
 	
