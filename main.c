@@ -39,6 +39,10 @@ int lsh_history(char **args);
 char **get_completions(const char *partial);
 void free_completions(char **completions);
 int lsh_cat(char **args);
+int lsh_grep(char **args);
+int lsh_touch(char **args);
+int lsh_echo(char **args);
+int lsh_rm(char **args);
 
 // Add global history
 History *shell_history;
@@ -98,7 +102,7 @@ char *lsh_read_line(void)
 			seq[1] = getchar();
 
 			if (seq[0] == '[') {
-				if (seq[1] == 'A') { //Up arrow
+					if (seq[1] == 'A') { //Up arrow
 						if (history_pos > 0) {
 							history_pos--;
 							strcpy(buffer, shell_history->commands[history_pos]);
@@ -264,7 +268,11 @@ char *builtin_str[] = {
 	"pwd",
 	"clear",
 	"history",
-	"cat"
+	"cat",
+	"grep",
+	"touch",
+	"echo",
+	"rm"
 };
 
 int (*builtin_func[]) (char **) = {
@@ -275,7 +283,11 @@ int (*builtin_func[]) (char **) = {
 	&lsh_pwd,
 	&lsh_clear,
 	&lsh_history,
-	&lsh_cat
+	&lsh_cat,
+	&lsh_grep,
+	&lsh_touch,
+	&lsh_echo,
+	&lsh_rm
 };
 
 int lsh_num_builtins() {
@@ -383,6 +395,94 @@ int lsh_cat(char **args)
 	}
 
 	fclose(fp);
+	return 1;
+}
+
+
+int lsh_grep(char **args) {
+	if (args[1] == NULL || args[2] == NULL) {
+		fprintf(stderr, "lsh: grep requires pattern and filename\n");
+		return 1;
+	}
+
+	FILE *fp = fopen(args[2], "r");
+	if (fp == NULL) {
+		perror("lsh");
+		return 1;
+	}
+
+	char *pattern = args[1];
+	char buffer[1024];
+	int line_number = 1;
+
+	while (fgets(buffer, sizeof(buffer), fp)) {
+		if (strstr(buffer, pattern)) {
+			printf("%d: %s", line_number, buffer);
+		}
+		line_number++;
+	}
+	fclose(fp);
+	return 1;
+}
+
+
+int lsh_touch(char **args) {
+	if (args[1] == NULL) {
+		fprintf(stderr, "lsh: touch requires a filename\n");
+		return 1;
+	}
+
+	FILE *fp = fopen(args[1], "a"); // 'a' creates file if doesn't exist
+	if (fp == NULL) {
+		perror("lsh");
+		return 1;
+	}
+	fclose(fp);
+	return 1;
+}
+
+
+int lsh_echo(char **args) {
+	if (args[1] == NULL) {
+		printf("\n");
+		return 1;
+	}
+
+	int i = 1;
+	while (args[i] != NULL && strcmp(args[i], ">") != 0) {
+		printf("%s ", args[i]);
+		i++;
+	}
+
+	if (args[i] && strcmp(args[i], ">") == 0 && args[i+1]) {
+		// Redirect to file
+		FILE *fp = fopen(args[i+1], "w");
+		if (fp == NULL) {
+			perror("lsh");
+			return 1;
+		}
+		for (int j = 1; j < i; j++) {
+			fprintf(fp, "%s ", args[j]);
+		}
+		fclose(fp);
+	}
+	else {
+		printf("\n");
+	}
+	return 1;
+}
+
+
+int lsh_rm(char **args) {
+	if (args[1] == NULL) {
+		fprintf(stderr, "lsh: rm requires a filename\n");
+		return 1;
+	}
+
+	if (remove(args[1]) != 0) {
+		perror("lsh");
+		return 1;
+	}
 	return 1;
 }
 
@@ -530,18 +630,5 @@ int main(int argc, char **argv)
 	
 	return EXIT_SUCCESS;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
