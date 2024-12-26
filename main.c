@@ -36,6 +36,9 @@ int lsh_ls(char **args);
 int lsh_pwd(char **args);
 int lsh_clear(char **args); 
 int lsh_history(char **args);
+char **get_completions(const char *partial);
+void free_completions(char **completions);
+int lsh_cat(char **args);
 
 // Add global history
 History *shell_history;
@@ -90,53 +93,72 @@ char *lsh_read_line(void)
 		c = getchar();
 
 		if (c ==27) { //ESC Sequence
-			      char seq[3];
-			      seq[0] = getchar();
-			      seq[1] = getchar();
+			char seq[3];
+			seq[0] = getchar();
+			seq[1] = getchar();
 
-			      if (seq[0] == '[') {
-				      if (seq[1] == 'A') { //Up arrow
-							   if (history_pos > 0) {
-								   history_pos--;
-								   strcpy(buffer, shell_history->commands[history_pos]);
-								   printf("\r> %s\033[K", buffer); // clear to end of line
-								   position = strlen(buffer);
-							   }
-							   continue;
-				      }
-				      else if (seq[1] == 'B') { //Down arrow
-								if (history_pos < shell_history->count -1) { // Fixed bounds check
-									history_pos++;
-									strcpy(buffer, shell_history->commands[history_pos]);
-									printf("\r> %s\033[K]", buffer); // clear to end of line
-									position = strlen(buffer);
-								}
-								else if (history_pos < shell_history->count -1) {
-									// Clear line if at newest command
-									buffer[0] = '\0';
-									printf("\r> \033[K");
-									position = 0;
-								}
-								continue;
-				      }
-			      }
-				  continue;
-		}
-			if (c == '\n') {
-				buffer[position] = '\0';
-				printf("\n");
-				disable_raw_mode();
-				if (position > 0) {
-				history_add(shell_history, buffer);
+			if (seq[0] == '[') {
+				if (seq[1] == 'A') { //Up arrow
+						if (history_pos > 0) {
+							history_pos--;
+							strcpy(buffer, shell_history->commands[history_pos]);
+							printf("\r> %s\033[K", buffer); // clear to end of line
+							position = strlen(buffer);
+						}
+						continue;
 				}
-				return buffer;
+				else if (seq[1] == 'B') { //Down arrow
+						if (history_pos < shell_history->count -1) { // Fixed bounds check
+							history_pos++;
+							strcpy(buffer, shell_history->commands[history_pos]);
+							printf("\r> %s\033[K]", buffer); // clear to end of line
+							position = strlen(buffer);
+						}
+						else if (history_pos < shell_history->count -1) {
+							// Clear line if at newest command
+							buffer[0] = '\0';
+							printf("\r> \033[K");
+							position = 0;
+						}
+						continue;
+				}
 			}
+			continue;
+		}
+		if (c == '\n') {
+			buffer[position] = '\0';
+			printf("\n");
+			disable_raw_mode();
+			if (position > 0) {
+			history_add(shell_history, buffer);
+			}
+			return buffer;
+		}
+
+		if (c == '\t') { //tab key
+			char **completions = get_completions(buffer);
+			if (completions && completions[0]) {
+				strcpy(buffer, completions[0]);
+				printf("\r> %s", buffer);
+				position = strlen(buffer);
+			}
+			free_completions(completions);
+			continue;
+		}
+
+		if (c == 127) { //Backspace
+			if (position > 0) {
+				position--;
+				printf("\b \b"); // move back, print space, move back again
+			}
+			continue;
+		}
 
 		if (c >= 32) {  // Printable characters
-            buffer[position] = c;
-            position++;
-            printf("%c", c);
-        }
+        	    buffer[position] = c;
+           	 position++;
+           	 printf("%c", c);
+       		 }
 
 
 		// If we have exceeded the buffer, reallocate
@@ -231,6 +253,7 @@ int lsh_launch(char **args)
 
 
 
+
 // list of builtin commands followed by their corresponding functions
 
 char *builtin_str[] = {
@@ -240,7 +263,8 @@ char *builtin_str[] = {
 	"ls",
 	"pwd",
 	"clear",
-	"history"
+	"history",
+	"cat"
 };
 
 int (*builtin_func[]) (char **) = {
@@ -250,7 +274,8 @@ int (*builtin_func[]) (char **) = {
 	&lsh_ls,
 	&lsh_pwd,
 	&lsh_clear,
-	&lsh_history
+	&lsh_history,
+	&lsh_cat
 };
 
 int lsh_num_builtins() {
@@ -339,6 +364,29 @@ int lsh_clear(char **args)
 }
 
 
+int lsh_cat(char **args)
+{
+	if (args[1] == NULL) {
+		fprintf(stderr, "lsh: expected argument to \"cat\"\n");
+		return 1;
+	}
+
+	FILE *fp = fopen(args[1], "r");
+	if (fp == NULL) {
+		perror("lsh");
+		return 1;
+	}
+
+	char buffer[1024];
+	while (fgets(buffer, sizeof(buffer), fp)) {
+		printf("%s", buffer);
+	}
+
+	fclose(fp);
+	return 1;
+}
+
+
 int lsh_execute(char **args)
 {
 	int i;
@@ -419,6 +467,52 @@ int lsh_history(char **args) {
 	return 1;
 }
 
+
+//completion functions
+char **get_completions(const char *partial) {
+	char **completions = malloc(sizeof(char*) * LSH_TOK_BUFSIZE);
+	int count = 0;
+
+
+	//First let's try built-in commands
+	for (int i = 0; i < lsh_num_builtins(); i++) {
+		if (strncmp(partial, builtin_str[i], strlen(partial)) == 0) {
+			completions[count++] = strdup(builtin_str[i]);
+		}
+	}
+
+
+	// Now let's try with files
+	DIR *dir = opendir(".");
+	struct dirent *entry;
+
+	while ((entry = readdir(dir)) && count < LSH_TOK_BUFSIZE) {
+		if (strncmp(partial, entry->d_name, strlen(partial)) == 0) {
+			completions[count++] = strdup(entry->d_name);
+		}
+	}
+	closedir(dir);
+
+	// show all matches if multiple found
+	if (count > 1) {
+		printf("\n");
+		for (int i = 0; i < count; i++) {
+			printf("%s ", completions[i]);
+		}
+		printf("\n> %s", partial);
+	}
+
+	completions[count] = NULL;
+	return completions;
+}
+
+void free_completions(char **completions) {
+	if (!completions) return;
+	for (int i = 0; completions[i]; i++) {
+		free(completions[i]);
+	}
+	free(completions);
+}
 
 int main(int argc, char **argv)
 {
